@@ -172,7 +172,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
 
-      - name: Upload artifacts to release (delete existing same-name assets first)
+      - name: Upload artifacts to release (handle nested dirs)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -192,23 +192,70 @@ jobs:
           assets_json=$(curl -sS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "$ASSET_LIST_API")
           echo "$assets_json" > /tmp/existing_assets.json || true
 
-          for filepath in downloaded_artifacts/*; do
-            if [ ! -f "$filepath" ]; then
-              continue
-            fi
+          find downloaded_artifacts -type f -print0 | while IFS= read -r -d '' filepath; do
+            echo "Found file to upload: $filepath"
             FNAME=$(basename "$filepath")
+            echo "Uploading as asset name: $FNAME"
+
             EXISTING_ID=$(jq -r --arg name "$FNAME" '.[] | select(.name==$name) | .id' /tmp/existing_assets.json || true)
             if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
-              curl -sS -X DELETE -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases/assets/${EXISTING_ID}" || true
+              echo "Deleting existing asset id $EXISTING_ID (name $FNAME)"
+              del_code=$(curl -s -o /tmp/del_resp.txt -w "%{http_code}" -X DELETE \
+                -H "Authorization: token ${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${REPO}/releases/assets/${EXISTING_ID}" || true)
+              echo "Delete HTTP code: $del_code"
+              cat /tmp/del_resp.txt || true
             fi
-            resp_file=/tmp/upload_resp_${FNAME}.json
-            curl --fail -sSL -X POST \
-              -H "Authorization: token ${GITHUB_TOKEN}" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary @"${filepath}" \
-              "${UPLOAD_URL}?name=${FNAME}" \
-              -o "$resp_file" -w "\nHTTP_CODE:%{http_code}\n"
-            cat "$resp_file" || true
+
+            try=0
+            maxtries=3
+            uploaded=false
+            while [ $try -lt $maxtries ]; do
+              try=$((try+1))
+              echo "Upload attempt $try/$maxtries for $FNAME"
+              resp_file="/tmp/upload_resp_${FNAME}.json"
+              http_code=$(curl -sS -w "%{http_code}" -X POST \
+                -H "Authorization: token ${GITHUB_TOKEN}" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary @"${filepath}" \
+                "${UPLOAD_URL}?name=${FNAME}" -o "$resp_file" || true)
+              echo "HTTP code: $http_code"
+              echo "Response body:"
+              cat "$resp_file" || true
+              if [ "$http_code" = "201" ]; then
+                echo "Upload succeeded for $FNAME"
+                uploaded=true
+                break
+              fi
+              if [ "$http_code" = "422" ]; then
+                echo "Got 422 (maybe already_exists). Trying to remove existing and retry."
+                EXISTING_ID=$(jq -r --arg name "$FNAME" '.[] | select(.name==$name) | .id' /tmp/existing_assets.json || true)
+                if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
+                  curl -sS -X DELETE -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases/assets/${EXISTING_ID}" || true
+                fi
+              fi
+              echo "Waiting 2s before retry..."
+              sleep 2
+            done
+
+            if [ "$uploaded" = "false" ]; then
+              timestamp=$(date -u +"%Y%m%dT%H%M%SZ")
+              NEWNAME="${FNAME%.*}-$timestamp.${FNAME##*.}"
+              echo "Upload failed for $FNAME; retrying with new name: $NEWNAME"
+              resp_file="/tmp/upload_resp_${NEWNAME}.json"
+              http_code=$(curl -sS -w "%{http_code}" -X POST \
+                -H "Authorization: token ${GITHUB_TOKEN}" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary @"${filepath}" \
+                "${UPLOAD_URL}?name=${NEWNAME}" -o "$resp_file" || true)
+              echo "HTTP code for renamed upload: $http_code"
+              cat "$resp_file" || true
+              if [ "$http_code" != "201" ]; then
+                echo "Renamed upload also failed for $FNAME; aborting."
+                exit 1
+              fi
+            fi
           done
         shell: bash
 
