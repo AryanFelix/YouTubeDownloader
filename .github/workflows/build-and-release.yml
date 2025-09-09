@@ -25,26 +25,24 @@ jobs:
           pip install yt-dlp pyinstaller
 
       - name: Download ffmpeg (Windows build)
+        shell: powershell
         run: |
-          powershell -Command " \
-            $zip = 'ffmpeg.zip'; \
-            Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile $zip; \
-            Expand-Archive -Path $zip -DestinationPath ./ffmpeg_temp; \
-            Remove-Item $zip -Force; \
-            # find bin path and copy ffmpeg.exe, ffprobe.exe into ./ffmpeg \
-            $bin = Get-ChildItem -Path ./ffmpeg_temp -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1; \
-            $binDir = Split-Path $bin.FullName; \
-            New-Item -ItemType Directory -Force -Path './ffmpeg'; \
-            Copy-Item -Path (Join-Path $binDir 'ffmpeg.exe') -Destination './ffmpeg/ffmpeg.exe'; \
-            Copy-Item -Path (Join-Path $binDir 'ffprobe.exe') -Destination './ffmpeg/ffprobe.exe' -ErrorAction SilentlyContinue; \
-            Remove-Item -Recurse -Force ./ffmpeg_temp; \
-          "
+          $zip = 'ffmpeg.zip'
+          Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath ./ffmpeg_temp
+          Remove-Item $zip -Force
+          $bin = Get-ChildItem -Path ./ffmpeg_temp -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
+          $binDir = Split-Path $bin.FullName
+          New-Item -ItemType Directory -Force -Path './ffmpeg' | Out-Null
+          Copy-Item -Path (Join-Path $binDir 'ffmpeg.exe') -Destination './ffmpeg/ffmpeg.exe'
+          Copy-Item -Path (Join-Path $binDir 'ffprobe.exe') -Destination './ffmpeg/ffprobe.exe' -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force ./ffmpeg_temp
 
       - name: Build exe with PyInstaller
         run: |
           pyinstaller --onefile --name "YouTubeDownloader.exe" --add-data "ffmpeg;ffmpeg" "download_youtube_best.py"
 
-      - name: Prepare artifact name and path
+      - name: Prepare artifact
         run: |
           mkdir artifact
           copy /Y dist\YouTubeDownloader.exe artifact\YouTubeDownloader.exe
@@ -70,7 +68,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload artifact (workflow run artifact)
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: YouTubeDownloader-windows
