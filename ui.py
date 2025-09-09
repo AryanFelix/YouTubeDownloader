@@ -4,10 +4,10 @@ from typing import List, Dict, Optional
 
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QTextEdit, QPushButton,
-    QListWidget, QLabel, QProgressBar, QSpacerItem, QSizePolicy, QListWidgetItem
+    QListWidget, QLabel, QProgressBar, QSizePolicy, QListWidgetItem
 )
-from PySide6.QtGui import QFont, QTextCursor, QPixmap
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QFont, QTextCursor, QPixmap, QIcon, QDesktopServices
+from PySide6.QtCore import Qt, QTimer, QUrl, QSize
 
 from workers import TitleFetcher, DownloadWorker
 from utils import (ERROR_RED, LOGO_PATH, PROGRESS_BLUE, SUCCESS_GREEN, TEXT_HIGH, WARN_AMBER, timestamp, maybe_add_bundled_ffmpeg_to_path,
@@ -71,14 +71,70 @@ class UXWindow(QWidget):
         hint.setStyleSheet(f"color: {MUTED}; font-size:9pt;")
         left_layout.addWidget(hint)
 
+        # ---------- input actions: Add | GitHub | Donate (with icons & colors) ----------
         input_actions = QHBoxLayout()
+        input_actions.setSpacing(12)
+
+        # Add button (expands)
         self.btn_add = QPushButton("Add")
         self.btn_add.setFixedHeight(36)
         self.btn_add.setStyleSheet(styles.secondary_button_style())
         input_actions.addWidget(self.btn_add, stretch=1)
+
+        # load icons
+        github_icon_path = os.path.join("assets", "github.png")
+        bmac_icon_path = os.path.join("assets", "bmac.png")
+        github_icon = QIcon(github_icon_path) if os.path.exists(github_icon_path) else QIcon()
+        bmac_icon = QIcon(bmac_icon_path) if os.path.exists(bmac_icon_path) else QIcon()
+
+        # GitHub button: white background, bold black text
+        self.btn_github = QPushButton("GitHub")
+        self.btn_github.setFixedHeight(36)
+        self.btn_github.setIcon(github_icon)
+        self.btn_github.setIconSize(QSize(20, 20))
+        self.btn_github.setStyleSheet("""
+            QPushButton {
+                background-color: #ffffff;
+                color: #000000;
+                font-weight: 700;
+                border: 1px solid rgba(0,0,0,0.15);
+                border-radius: 8px;
+                padding: 6px 12px;
+                text-align: left;
+            }
+            QPushButton::hover {
+                background-color: #f0f0f0;
+            }
+        """)
+        self.btn_github.setToolTip("Open project on GitHub")
+        input_actions.addWidget(self.btn_github, stretch=0)
+
+        # Donate (BuyMeACoffee) button: yellow background, bold dark text
+        self.btn_donate = QPushButton("Donate")
+        self.btn_donate.setFixedHeight(36)
+        self.btn_donate.setIcon(bmac_icon)
+        self.btn_donate.setIconSize(QSize(20, 20))
+        self.btn_donate.setStyleSheet("""
+            QPushButton {
+                background-color: #ffdd00;
+                color: #0d0c22;
+                font-weight: 700;
+                border: 1px solid rgba(0,0,0,0.08);
+                border-radius: 8px;
+                padding: 6px 12px;
+                text-align: left;
+            }
+            QPushButton::hover {
+                background-color: #ffd600;
+            }
+        """)
+        self.btn_donate.setToolTip("Support the project on Buy Me A Coffee")
+        input_actions.addWidget(self.btn_donate, stretch=0)
+
         left_layout.addLayout(input_actions)
 
-        main_layout.addLayout(left_layout, 55)
+        # Add left and right layouts with equal stretch so columns are same width
+        main_layout.addLayout(left_layout, 1)
 
         # RIGHT column
         right_layout = QVBoxLayout()
@@ -130,25 +186,20 @@ class UXWindow(QWidget):
         self._progress_anim_state = False
         self._progress_anim_timer.timeout.connect(self._toggle_progress_animation)
 
-        # ---------- UPDATED: bottom controls now evenly fill column width ----------
+        # ---------- bottom controls (evenly fill column width) ----------
         bottom_controls = QHBoxLayout()
         bottom_controls.setSpacing(12)
-        # remove spacer and give each button expanding policy so they share the available width equally
         self.btn_download_selected = QPushButton("Download Selected")
         self.btn_download_all = QPushButton("Download All")
         self.btn_stop = QPushButton("Stop")
 
-        for btn, style_fn, accent in (
-            (self.btn_download_selected, styles.primary_button_style, False),
-            (self.btn_download_all, styles.primary_button_style, True),
-            (self.btn_stop, styles.secondary_button_style, False)
-        ):
+        for btn in (self.btn_download_selected, self.btn_download_all, self.btn_stop):
             btn.setFixedHeight(42)
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            if btn is self.btn_stop:
-                btn.setStyleSheet(styles.secondary_button_style(outline=True))
-            else:
-                btn.setStyleSheet(style_fn(accent=accent) if btn is not self.btn_stop else styles.secondary_button_style(outline=True))
+
+        self.btn_download_selected.setStyleSheet(styles.primary_button_style(accent=False))
+        self.btn_download_all.setStyleSheet(styles.primary_button_style(accent=True))
+        self.btn_stop.setStyleSheet(styles.secondary_button_style(outline=True))
 
         bottom_controls.addWidget(self.btn_download_selected, stretch=1)
         bottom_controls.addWidget(self.btn_download_all, stretch=1)
@@ -156,7 +207,8 @@ class UXWindow(QWidget):
 
         right_layout.addLayout(bottom_controls)
 
-        main_layout.addLayout(right_layout, 45)
+        # add right layout with same stretch as left to make columns equal width
+        main_layout.addLayout(right_layout, 1)
 
         # connections
         self.btn_add.clicked.connect(self._add_from_input)
@@ -165,6 +217,10 @@ class UXWindow(QWidget):
         self.btn_download_selected.clicked.connect(self._download_selected)
         self.btn_download_all.clicked.connect(self._download_all)
         self.btn_stop.clicked.connect(self._stop_worker)
+
+        # GitHub / Donate open urls
+        self.btn_github.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/AryanFelix/YouTubeDownloader")))
+        self.btn_donate.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://buymeacoffee.com/aryanfelix")))
 
         # state objects
         self.worker: Optional[DownloadWorker] = None
