@@ -98,8 +98,7 @@ jobs:
           ARTNAME="${{ env.APP_NAME }}-${{ matrix.os }}-${GITHUB_REF_NAME}.${{ matrix.ext }}"
 
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            powershell -Command "Compress-Archive -Path artifact/* -DestinationPath '${GITHUB_WORKSPACE}/${ARTNAME}' -Force"
-            powershell -Command "Get-FileHash -Algorithm SHA256 -Path '${GITHUB_WORKSPACE}\\${ARTNAME}' | ForEach-Object { $_.Hash } > '${GITHUB_WORKSPACE}\\${ARTNAME}.sha256'"
+            powershell -Command "Compress-Archive -Path artifact/* -DestinationPath '${GITHUB_WORKSPACE}\\${ARTNAME}' -Force; (Get-FileHash -Algorithm SHA256 -Path '${GITHUB_WORKSPACE}\\${ARTNAME}').Hash | Out-File -Encoding ASCII -FilePath '${GITHUB_WORKSPACE}\\${ARTNAME}.sha256'"
           else
             tar -czf "${GITHUB_WORKSPACE}/${ARTNAME}" -C artifact .
             sha256sum "${GITHUB_WORKSPACE}/${ARTNAME}" | awk '{print $1}' > "${GITHUB_WORKSPACE}/${ARTNAME}.sha256"
