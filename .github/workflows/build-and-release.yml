@@ -43,9 +43,16 @@ jobs:
           pyinstaller --onefile --name "YouTubeDownloader.exe" --add-data "ffmpeg;ffmpeg" "download_youtube_best.py"
 
       - name: Prepare artifact
+        shell: powershell
         run: |
-          mkdir artifact
-          copy /Y dist\YouTubeDownloader.exe artifact\YouTubeDownloader.exe
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          if (Test-Path 'dist\YouTubeDownloader.exe') {
+            Copy-Item -Path 'dist\YouTubeDownloader.exe' -Destination 'artifact\YouTubeDownloader.exe' -Force
+            Write-Host "✅ Copied exe to artifact/"
+          } else {
+            Write-Error "❌ dist\YouTubeDownloader.exe not found — build may have failed earlier."
+            exit 1
+          }
 
       - name: Create release (if triggered by tag)
         if: startsWith(github.ref, 'refs/tags/')
