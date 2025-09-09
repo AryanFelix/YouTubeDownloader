@@ -11,45 +11,39 @@ permissions:
   id-token: write
 
 env:
-  PYINSTALLER_SPEC: main.spec
   ENTRY_SCRIPT: main.py
   APP_NAME: YouTubeDownloader
 
 jobs:
   build:
-    name: Build for ${{ matrix.os }}
+    name: Build (matrix)
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-        python: [3.11]
-    outputs:
-      artifact-name: ${{ steps.set-artifact-name.outputs.artifact-name }}
+        include:
+          - os: windows-latest
+            ext: zip
+          - os: ubuntu-latest
+            ext: tar.gz
+          - os: macos-latest
+            ext: tar.gz
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python ${{ matrix.python }}
+      - name: Setup Python 3.11
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ matrix.python }}
+          python-version: 3.11
 
-      - name: Set artifact name
-        id: set-artifact-name
-        run: |
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            echo "::set-output name=artifact-name::${{ env.APP_NAME }}-windows-${GITHUB_REF_NAME}.zip"
-          elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            echo "::set-output name=artifact-name::${{ env.APP_NAME }}-linux-${GITHUB_REF_NAME}.tar.gz"
-          else
-            echo "::set-output name=artifact-name::${{ env.APP_NAME }}-macos-${GITHUB_REF_NAME}.tar.gz"
-          fi
-
-      - name: Install dependencies
+      - name: Install deps & PyInstaller
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install pyinstaller
+        shell: bash
 
       - name: Install ffmpeg (platform)
         run: |
@@ -62,78 +56,77 @@ jobs:
           elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             choco install -y ffmpeg
           fi
-
-      - name: Prepare build folder
-        run: |
-          mkdir -p build_artifact
+        shell: bash
 
       - name: Build with PyInstaller
         env:
           PYTHONUNBUFFERED: 1
         run: |
-          # Choose the correct --add-data separator for pyinstaller per-platform
-          # - Windows: src;dest (use semicolon)
-          # - POSIX (linux/mac): src:dest (use colon)
-          ADD_DATA=""
+          echo "Building on runner: $RUNNER_OS / matrix.os = ${{ matrix.os }}"
+
+          # choose add-data syntax per platform
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # include assets and (optional) an ffmpeg folder if present in repo
-            # bundling your own assets folder: "assets;assets"
+            # windows: use semicolon to separate src;dest
             ADD_DATA="assets;assets"
             pyinstaller --noconfirm --onefile --name "${{ env.APP_NAME }}.exe" --add-data "$ADD_DATA" "${{ env.ENTRY_SCRIPT }}"
-            # resulting file: dist\YouTubeDownloader.exe
+            BUILD_PATH="dist/${{ env.APP_NAME }}.exe"
           else
+            # linux / mac: use colon to separate src:dest
             ADD_DATA="assets:assets"
             pyinstaller --noconfirm --onefile --name "${{ env.APP_NAME }}" --add-data "$ADD_DATA" "${{ env.ENTRY_SCRIPT }}"
-            # resulting file: dist/YouTubeDownloader
+            BUILD_PATH="dist/${{ env.APP_NAME }}"
           fi
 
-      - name: Bundle runtime files
-        run: |
-          mkdir -p artifact
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            if [ -f dist/${{ env.APP_NAME }}.exe ]; then
-              cp dist/${{ env.APP_NAME }}.exe artifact/
-            else
-              echo "ERROR: expected executable dist/${{ env.APP_NAME }}.exe not found" && exit 1
-            fi
-            # optionally include bundled ffmpeg folder if you put one into repo or want to ship it
-            if [ -d ffmpeg ]; then
-              cp -r ffmpeg artifact/
-            fi
-            # zip artifact folder
-            powershell -Command "Compress-Archive -Path artifact/* -DestinationPath ${GITHUB_WORKSPACE}/${{ steps.set-artifact-name.outputs.artifact-name }}"
-          else
-            # POSIX: tar.gz
-            if [ -f dist/${{ env.APP_NAME }} ]; then
-              cp dist/${{ env.APP_NAME }} artifact/
-            else
-              echo "ERROR: expected executable dist/${{ env.APP_NAME }} not found" && exit 1
-            fi
-            if [ -d ffmpeg ]; then
-              cp -r ffmpeg artifact/
-            fi
-            tar -czf "${GITHUB_WORKSPACE}/${{ steps.set-artifact-name.outputs.artifact-name }}" -C artifact .
+          echo "Expected build path: $BUILD_PATH"
+          if [ ! -f "$BUILD_PATH" ]; then
+            echo "ERROR: Build artifact not found at $BUILD_PATH"
+            ls -la dist || true
+            exit 1
           fi
+
+          # Prepare artifact folder
+          mkdir -p artifact
+          cp "$BUILD_PATH" artifact/
+
+          # include bundled ffmpeg folder if present in repo (optional)
+          if [ -d "ffmpeg" ]; then
+            cp -r ffmpeg artifact/
+          fi
+
+          # Archive appropriately
+          ARTNAME="${{ env.APP_NAME }}-${{ matrix.os }}-${GITHUB_REF_NAME}.${{ matrix.ext }}"
+          echo "Artifact name will be: $ARTNAME"
+
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            # Use PowerShell Compress-Archive for Windows runners
+            powershell -Command "Compress-Archive -Path artifact/* -DestinationPath '${GITHUB_WORKSPACE}/${ARTNAME}' -Force"
+          else
+            tar -czf "${GITHUB_WORKSPACE}/${ARTNAME}" -C artifact .
+          fi
+
+          echo "Created archive: ${GITHUB_WORKSPACE}/${ARTNAME}"
+        shell: bash
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.set-artifact-name.outputs.artifact-name }}
-          path: ${{ github.workspace }}/${{ steps.set-artifact-name.outputs.artifact-name }}
+          name: ${{ env.APP_NAME }}-${{ matrix.os }}-${{ github.ref_name }}.${{ matrix.ext }}
+          path: ${{ github.workspace }}/${{ env.APP_NAME }}-${{ matrix.os }}-${{ github.ref_name }}.${{ matrix.ext }}
 
   create-release:
     name: Create Release and attach artifacts
-    needs: build
     runs-on: ubuntu-latest
+    needs: build
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - name: Download artifacts from build jobs
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: downloaded_artifacts
 
       - name: List downloaded artifacts
         run: ls -la downloaded_artifacts || true
+        shell: bash
 
       - name: Create GitHub Release
         id: create_release
@@ -147,27 +140,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload release assets
-        run: |
-          set -e
-          for f in downloaded_artifacts/*; do
-            echo "Uploading $f"
-            gh_release_asset_name="$(basename "$f")"
-            # Use curl to upload via GitHub REST API (safer cross-version)
-            upload_url=$(jq -r .upload_url < "${GITHUB_WORKSPACE}/.github/release_response.json" 2>/dev/null || true)
-            # fallback to using actions/upload-release-asset if API response not present
-            if [ -z "$upload_url" ]; then
-              # Use official action to upload single asset
-              echo "Using actions/upload-release-asset to upload $f"
-              gh release upload "${{ github.ref_name }}" "$f" --clobber || true
-            else
-              echo "Custom upload path (not used)."
-            fi
-          done
+      - name: Upload artifacts to Release
+        uses: softprops/action-upload-release@v1
+        with:
+          files: downloaded_artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Done
+        run: echo "Release ${{ github.ref_name }} created and artifacts uploaded."
         shell: bash
-
-      - name: Confirm release
-        run: echo "Release ${GITHUB_REF_NAME} created and artifacts uploaded."
-
