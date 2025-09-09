@@ -1,14 +1,13 @@
-name: Build & Release
+name: Build and Release
 
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - "v*.*.*"
 
 permissions:
   contents: write
   packages: write
-  id-token: write
 
 env:
   ENTRY_SCRIPT: main.py
@@ -16,328 +15,173 @@ env:
 
 jobs:
   build:
-    name: Build (matrix)
+    name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-            ext: zip
-          - os: ubuntu-latest
-            ext: tar.gz
-          - os: macos-latest
-            ext: tar.gz
+        os: [windows-latest, ubuntu-latest, macos-latest]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.11
+          python-version: "3.11"
 
-      - name: Install Python deps and PyInstaller (Linux / macOS)
-        if: matrix.os != 'windows-latest'
+      - name: Install Python dependencies
         shell: bash
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install pyinstaller
 
-      - name: Install Python deps and PyInstaller (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) { pip install -r requirements.txt }
-          pip install pyinstaller
-
-      - name: Prepare portable ffmpeg (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Prepare portable ffmpeg (platform-specific)
         shell: bash
         run: |
           set -euo pipefail
-          echo "Preparing ffmpeg for linux runner..."
-          FFMPEG_URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+          declare -A FFMPEG_URLS
+          FFMPEG_URLS[windows-latest]="https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
+          FFMPEG_URLS[ubuntu-latest]="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+          FFMPEG_URLS[macos-latest]="https://evermeet.cx/ffmpeg/ffmpeg-6.0.zip"
+
+          KEY="${{ matrix.os }}"
+          URL="${FFMPEG_URLS[$KEY]}"
+          echo "Selected ffmpeg URL for $KEY: $URL"
           mkdir -p ffmpeg
           tmpdir="$(mktemp -d)"
           cd "$tmpdir"
-          curl -sSL -o ffmpeg.tar.xz "$FFMPEG_URL"
-          tar -xf ffmpeg.tar.xz
-          dir=$(find . -maxdepth 2 -type d -name "*ffmpeg*static*" | head -n1 || true)
-          if [ -n "$dir" ]; then
-            find "$dir" -type f -iname "ffmpeg" -o -iname "ffprobe" -print0 | xargs -0 -I{} cp {} "${GITHUB_WORKSPACE}/ffmpeg/"
+
+          if [[ "$KEY" == "windows-latest" ]]; then
+            curl -sSL -o ffmpeg.zip "$URL"
+            unzip -q ffmpeg.zip
+            find . -type f \( -iname "ffmpeg.exe" -o -iname "ffprobe.exe" \) -exec cp {} "${GITHUB_WORKSPACE}/ffmpeg/" \;
+          elif [[ "$KEY" == "macos-latest" ]]; then
+            curl -sSL -o ffmpeg.zip "$URL"
+            unzip -q ffmpeg.zip
+            find . -type f \( -name "ffmpeg" -o -name "ffprobe" \) -perm -u=x -exec cp {} "${GITHUB_WORKSPACE}/ffmpeg/" \;
           else
-            find . -type f -iname "ffmpeg" -o -iname "ffprobe" -print0 | xargs -0 -I{} cp {} "${GITHUB_WORKSPACE}/ffmpeg/" || true
+            curl -sSL -o ffmpeg.tar.xz "$URL"
+            tar -xf ffmpeg.tar.xz
+            dir=$(find . -maxdepth 2 -type d -name "*ffmpeg*static*" | head -n1 || true)
+            if [[ -n "$dir" ]]; then
+              find "$dir" -type f \( -name "ffmpeg" -o -name "ffprobe" \) -exec cp {} "${GITHUB_WORKSPACE}/ffmpeg/" \;
+            else
+              find . -type f \( -name "ffmpeg" -o -name "ffprobe" \) -exec cp {} "${GITHUB_WORKSPACE}/ffmpeg/" \;
+            fi
           fi
+
           chmod +x "${GITHUB_WORKSPACE}/ffmpeg/"* || true
-          echo "FFMPEG_DIR=${GITHUB_WORKSPACE}/ffmpeg" >> ${GITHUB_OUTPUT}
-
-      - name: Prepare portable ffmpeg (macOS)
-        if: matrix.os == 'macos-latest'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Preparing ffmpeg for macos runner..."
-          FFMPEG_URL="https://evermeet.cx/ffmpeg/ffmpeg-6.0.zip"
-          mkdir -p ffmpeg
-          tmpdir="$(mktemp -d)"
-          cd "$tmpdir"
-          curl -sSL -o ffmpeg.zip "$FFMPEG_URL"
-          unzip -q ffmpeg.zip
-          # copy any executable named ffmpeg / ffprobe
-          find . -type f -perm -u=x -name "ffmpeg" -o -name "ffprobe" -print0 | xargs -0 -I{} cp {} "${GITHUB_WORKSPACE}/ffmpeg/" || true
-          chmod +x "${GITHUB_WORKSPACE}/ffmpeg/"* || true
-          echo "FFMPEG_DIR=${GITHUB_WORKSPACE}/ffmpeg" >> ${GITHUB_OUTPUT}
-
-      - name: Prepare portable ffmpeg (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "Preparing ffmpeg for windows runner..."
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
-          New-Item -ItemType Directory -Force -Path ffmpeg | Out-Null
-          $tmp = New-TemporaryFile
-          Invoke-WebRequest -Uri $url -OutFile $tmp
-          $extractDir = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "ffext") -Force
-          Expand-Archive -Path $tmp -DestinationPath $extractDir -Force
-          Get-ChildItem -Path $extractDir -Filter "ffmpeg.exe" -Recurse | ForEach-Object { Copy-Item -Path $_.FullName -Destination (Join-Path $PWD "ffmpeg") -Force }
-          Get-ChildItem -Path $extractDir -Filter "ffprobe.exe" -Recurse | ForEach-Object { Copy-Item -Path $_.FullName -Destination (Join-Path $PWD "ffmpeg") -Force }
-          Get-ChildItem -Path (Join-Path $PWD "ffmpeg") | ForEach-Object { & icacls $_.FullName /grant Everyone:R } || true
-          Write-Host "FFMPEG_DIR=$PWD\\ffmpeg" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Verify ffmpeg (debug)
-        shell: bash
-        run: |
-          echo "FFMPEG folder contents:"
-          if [ -d ffmpeg ]; then ls -la ffmpeg || true; else echo "ffmpeg/ not found"; fi
-        if: matrix.os != 'windows-latest'
-
-      - name: Verify ffmpeg (debug Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          Write-Host "FFMPEG folder contents:"
-          if (Test-Path .\ffmpeg) { Get-ChildItem .\ffmpeg -Force | Format-Table -AutoSize } else { Write-Host "ffmpeg/ not found" }
-
-      - name: Build with PyInstaller (Linux / macOS)
-        if: matrix.os != 'windows-latest'
-        shell: bash
-        env:
-          PYTHONUNBUFFERED: 1
-        run: |
-          set -euo pipefail
-          echo "Building for ${RUNNER_OS:-linux/macos}..."
-          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            ICON_FLAG="--icon assets/logoApp.icns"
-            ADD_DATA_ASSETS="assets:assets"
-            ADD_DATA_FFMPEG="ffmpeg:ffmpeg"
-            EXENAME="${APP_NAME}"
-          else
-            ICON_FLAG="--icon assets/logoApp.png"
-            ADD_DATA_ASSETS="assets:assets"
-            ADD_DATA_FFMPEG="ffmpeg:ffmpeg"
-            EXENAME="${APP_NAME}"
-          fi
-
-          pyinstaller --noconfirm --onefile --windowed --name "$EXENAME" $ICON_FLAG --add-data "$ADD_DATA_ASSETS" --add-data "$ADD_DATA_FFMPEG" "${ENTRY_SCRIPT}"
-
-          BUILD_PATH="dist/${EXENAME}"
-          if [ ! -f "$BUILD_PATH" ]; then
-            ls -la dist || true
-            echo "ERROR: Build artifact not found at $BUILD_PATH"
-            exit 1
-          fi
-
-          mkdir -p artifact
-          cp "$BUILD_PATH" artifact/ || true
-          if [ -d "ffmpeg" ]; then cp -r ffmpeg artifact/ || true; fi
-
-          ARTNAME="${APP_NAME}-${{ matrix.os }}-${{ github.ref_name }}.${{ matrix.ext }}"
-
-          tar -czf "${GITHUB_WORKSPACE}/${ARTNAME}" -C artifact .
-          sha256sum "${GITHUB_WORKSPACE}/${ARTNAME}" | awk '{print $1}' > "${GITHUB_WORKSPACE}/${ARTNAME}.sha256"
-          echo "Created ${GITHUB_WORKSPACE}/${ARTNAME}"
+          echo "ffmpeg files in workspace:"
+          ls -la ffmpeg || true
 
       - name: Build with PyInstaller (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         env:
-          PYTHONUNBUFFERED: 1
+          ENTRY_SCRIPT: main.py
+          APP_NAME: YouTubeDownloader
         run: |
           $ErrorActionPreference = "Stop"
           Write-Host "Building for Windows..."
-          $ICON_FLAG = "--icon assets\\logoApp.ico"
+          $APPNAME = $env:APP_NAME
+          $ICON = "assets\logoApp.ico"
           $ADD_DATA_ASSETS = "assets;assets"
           $ADD_DATA_FFMPEG = "ffmpeg;ffmpeg"
-          $EXENAME = "${env:APP_NAME}.exe"
-          pyinstaller --noconfirm --onefile --windowed --name $EXENAME $ICON_FLAG --add-data $ADD_DATA_ASSETS --add-data $ADD_DATA_FFMPEG ${env:ENTRY_SCRIPT}
-          $buildPath = Join-Path $PWD "dist" $EXENAME
+          $ENTRY = $env:ENTRY_SCRIPT
+
+          python -m PyInstaller --noconfirm --onefile --windowed `
+            --name "$APPNAME" `
+            --icon "$ICON" `
+            --add-data "$ADD_DATA_ASSETS" `
+            --add-data "$ADD_DATA_FFMPEG" `
+            "$ENTRY"
+
+          $buildPath = Join-Path $PWD "dist" ($APPNAME + ".exe")
           if (-not (Test-Path $buildPath)) {
             Get-ChildItem -Path dist -Recurse -Force | Format-Table -AutoSize
             throw "Build artifact not found at $buildPath"
           }
+
           New-Item -ItemType Directory -Force -Path artifact | Out-Null
-          Copy-Item -Path $buildPath -Destination (Join-Path $PWD "artifact" -ChildPath $EXENAME) -Force
+          Copy-Item -Path $buildPath -Destination (Join-Path $PWD "artifact" -ChildPath (Split-Path $buildPath -Leaf)) -Force
           if (Test-Path .\ffmpeg) { Copy-Item -Path .\ffmpeg -Destination .\artifact\ -Recurse -Force }
-          $ARTNAME = "${env:APP_NAME}-${{ matrix.os }}-${{ github.ref_name }}.${{ matrix.ext }}"
+
+          $tag = "${{ github.ref_name }}" -replace 'refs/tags/',''
+          if (-not $tag) { $tag = "latest" }
+          $ARTNAME = "$APPNAME-windows-latest-$tag.zip"
           $zipPath = Join-Path $PWD $ARTNAME
           if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
           Compress-Archive -Path artifact\* -DestinationPath $zipPath -Force
           $hash = Get-FileHash -Path $zipPath -Algorithm SHA256
-          $hash.Hash | Out-File -Encoding ASCII -FilePath "${zipPath}.sha256"
-          Write-Host "Created $zipPath"
+          $hash.Hash | Out-File -Encoding ASCII -FilePath ("${zipPath}.sha256")
+          Write-Host "Created $zipPath and ${zipPath}.sha256"
 
-      - name: Upload build artifact and checksum
+      - name: Build with PyInstaller (Linux / macOS)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        env:
+          ENTRY_SCRIPT: main.py
+          APP_NAME: YouTubeDownloader
+        run: |
+          set -euo pipefail
+          echo "Building for ${{ matrix.os }}..."
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            ICON="assets/logoApp.icns"
+          else
+            ICON="assets/logoApp.png"
+          fi
+
+          python -m PyInstaller --noconfirm --onefile --windowed \
+            --name "$APP_NAME" \
+            --icon "$ICON" \
+            --add-data "assets:assets" \
+            --add-data "ffmpeg:ffmpeg" \
+            "$ENTRY_SCRIPT"
+
+          mkdir -p artifact
+          if [ -f "dist/$APP_NAME" ]; then
+            cp "dist/$APP_NAME" artifact/
+          fi
+          cp -r ffmpeg artifact/ || true
+
+          tag="${GITHUB_REF_NAME:-latest}"
+          ARTNAME="$APP_NAME-${{ matrix.os }}-$tag.zip"
+          if command -v zip >/dev/null 2>&1; then
+            zip -r "$ARTNAME" artifact
+          else
+            tar -czf "$ARTNAME" -C artifact .
+          fi
+          sha256sum "$ARTNAME" > "$ARTNAME.sha256"
+          echo "Created $ARTNAME and $ARTNAME.sha256"
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.APP_NAME }}-${{ matrix.os }}-${{ github.ref_name }}.${{ matrix.ext }}
+          name: builds-${{ matrix.os }}
           path: |
-            ${{ github.workspace }}/${{ env.APP_NAME }}-${{ matrix.os }}-${{ github.ref_name }}.${{ matrix.ext }}
-            ${{ github.workspace }}/${{ env.APP_NAME }}-${{ matrix.os }}-${{ github.ref_name }}.${{ matrix.ext }}.sha256
+            *.zip
+            *.sha256
 
-  create-release:
+  release:
     name: Create Release and attach artifacts
-    runs-on: ubuntu-latest
     needs: build
+    runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          path: downloaded_artifacts
+          path: ./release_artifacts
 
-      - name: List downloaded artifacts
-        run: |
-          ls -la downloaded_artifacts || true
-        shell: bash
-
-      - name: Get release by tag
-        id: get_release
-        run: |
-          set -euo pipefail
-          API="https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}"
-          resp=$(curl -sS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "$API" || true)
-          echo "$resp" > /tmp/release_by_tag.json || true
-          jq -r '.id // empty' /tmp/release_by_tag.json > /tmp/release_id || true
-          jq -r '.upload_url // empty' /tmp/release_by_tag.json > /tmp/upload_url || true
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: Automated release generated by GitHub Actions
+          files: ./release_artifacts/**/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-
-      - name: Create release if missing
-        id: create_release
-        run: |
-          set -euo pipefail
-          RELEASE_ID=$(cat /tmp/release_id 2>/dev/null || true)
-          UPLOAD_URL=$(cat /tmp/upload_url 2>/dev/null || true)
-          if [ -n "$RELEASE_ID" ] && [ -n "$UPLOAD_URL" ]; then
-            echo "upload_url=$UPLOAD_URL" >> $GITHUB_OUTPUT
-            echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          API="https://api.github.com/repos/${{ github.repository }}/releases"
-          payload=$(jq -n --arg tag "${{ github.ref_name }}" --arg name "Release ${{ github.ref_name }}" --arg body "Automated release generated by GitHub Actions" '{tag_name:$tag, name:$name, body:$body, draft:false, prerelease:false}')
-          resp=$(curl -sS -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -d "$payload" "$API")
-          echo "$resp" > /tmp/release_create.json
-          RID=$(jq -r '.id' /tmp/release_create.json || true)
-          UPL=$(jq -r '.upload_url' /tmp/release_create.json || true)
-          if [ -z "$RID" ] || [ -z "$UPL" ]; then
-            cat /tmp/release_create.json || true
-            echo "Failed creating release"
-            exit 1
-          fi
-          echo "upload_url=$UPL" >> $GITHUB_OUTPUT
-          echo "release_id=$RID" >> $GITHUB_OUTPUT
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-
-      - name: Upload artifacts to release (handle nested dirs)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-
-          UPLOAD_URL_TEMPLATE="${{ steps.create_release.outputs.upload_url }}"
-          UPLOAD_URL="${UPLOAD_URL_TEMPLATE%\{*}"
-          RELEASE_ID="${{ steps.create_release.outputs.release_id }}"
-
-          if [ -z "$UPLOAD_URL" ] || [ -z "$RELEASE_ID" ]; then
-            echo "Missing upload_url or release_id"
-            exit 1
-          fi
-
-          ASSET_LIST_API="https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets"
-          assets_json=$(curl -sS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "$ASSET_LIST_API")
-          echo "$assets_json" > /tmp/existing_assets.json || true
-
-          find downloaded_artifacts -type f -print0 | while IFS= read -r -d '' filepath; do
-            echo "Found file to upload: $filepath"
-            FNAME=$(basename "$filepath")
-            echo "Uploading as asset name: $FNAME"
-
-            EXISTING_ID=$(jq -r --arg name "$FNAME" '.[] | select(.name==$name) | .id' /tmp/existing_assets.json || true)
-            if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
-              echo "Deleting existing asset id $EXISTING_ID (name $FNAME)"
-              curl -sS -X DELETE -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases/assets/${EXISTING_ID}" || true
-            fi
-
-            try=0
-            maxtries=3
-            uploaded=false
-            while [ $try -lt $maxtries ]; do
-              try=$((try+1))
-              echo "Upload attempt $try/$maxtries for $FNAME"
-              resp_file="/tmp/upload_resp_${FNAME}.json"
-              http_code=$(curl -sS -w "%{http_code}" -X POST \
-                -H "Authorization: token ${GITHUB_TOKEN}" \
-                -H "Content-Type: application/octet-stream" \
-                --data-binary @"${filepath}" \
-                "${UPLOAD_URL}?name=${FNAME}" -o "$resp_file" || true)
-              echo "HTTP code: $http_code"
-              echo "Response body:"
-              cat "$resp_file" || true
-              if [ "$http_code" = "201" ]; then
-                echo "Upload succeeded for $FNAME"
-                uploaded=true
-                break
-              fi
-              if [ "$http_code" = "422" ]; then
-                echo "Got 422 (maybe already_exists). Trying to remove existing and retry."
-                EXISTING_ID=$(jq -r --arg name "$FNAME" '.[] | select(.name==$name) | .id' /tmp/existing_assets.json || true)
-                if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
-                  curl -sS -X DELETE -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases/assets/${EXISTING_ID}" || true
-                fi
-              fi
-              echo "Waiting 2s before retry..."
-              sleep 2
-            done
-
-            if [ "$uploaded" = "false" ]; then
-              timestamp=$(date -u +"%Y%m%dT%H%M%SZ")
-              NEWNAME="${FNAME%.*}-$timestamp.${FNAME##*.}"
-              echo "Upload failed for $FNAME; retrying with new name: $NEWNAME"
-              resp_file="/tmp/upload_resp_${NEWNAME}.json"
-              http_code=$(curl -sS -w "%{http_code}" -X POST \
-                -H "Authorization: token ${GITHUB_TOKEN}" \
-                -H "Content-Type: application/octet-stream" \
-                --data-binary @"${filepath}" \
-                "${UPLOAD_URL}?name=${NEWNAME}" -o "$resp_file" || true)
-              echo "HTTP code for renamed upload: $http_code"
-              cat "$resp_file" || true
-              if [ "$http_code" != "201" ]; then
-                echo "Renamed upload also failed for $FNAME; aborting."
-                exit 1
-              fi
-            fi
-          done
-        shell: bash
-
-      - name: Done
-        run: echo "Release ${{ github.ref_name }} ensured and artifacts uploaded."
-        shell: bash
