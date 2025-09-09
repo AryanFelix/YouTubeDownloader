@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest]
 
     steps:
       - name: Checkout repository
@@ -38,44 +38,49 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install pyinstaller
 
-      - name: Prepare portable ffmpeg (platform-specific)
+      - name: Prepare portable ffmpeg (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "Preparing ffmpeg for Windows..."
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
+          $out = Join-Path $env:GITHUB_WORKSPACE "tmp_ffmpeg_win.zip"
+          Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+          $extractDir = Join-Path $env:TEMP "ffext"
+          if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          Expand-Archive -Path $out -DestinationPath $extractDir -Force
+          $dest = Join-Path $env:GITHUB_WORKSPACE "ffmpeg"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Get-ChildItem -Path $extractDir -Filter "ffmpeg.exe" -Recurse -File | ForEach-Object { Copy-Item -Path $_.FullName -Destination $dest -Force }
+          Get-ChildItem -Path $extractDir -Filter "ffprobe.exe" -Recurse -File | ForEach-Object { Copy-Item -Path $_.FullName -Destination $dest -Force }
+          Write-Host "ffmpeg files copied to: $dest"
+          Get-ChildItem -Path $dest -File -Force | Format-Table -AutoSize
+
+      - name: Prepare portable ffmpeg (Linux)
+        if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
           set -euo pipefail
-          declare -A FFMPEG_URLS
-          FFMPEG_URLS[windows-latest]="https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
-          FFMPEG_URLS[ubuntu-latest]="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-          FFMPEG_URLS[macos-latest]="https://evermeet.cx/ffmpeg/ffmpeg-6.0.zip"
-
-          KEY="${{ matrix.os }}"
-          URL="${FFMPEG_URLS[$KEY]}"
-          echo "Selected ffmpeg URL for $KEY: $URL"
-          mkdir -p ffmpeg
+          echo "Preparing ffmpeg for Linux..."
+          URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+          mkdir -p "${GITHUB_WORKSPACE}/ffmpeg"
           tmpdir="$(mktemp -d)"
           cd "$tmpdir"
-
-          if [[ "$KEY" == "windows-latest" ]]; then
-            curl -sSL -o ffmpeg.zip "$URL"
-            unzip -q ffmpeg.zip
-            find . -type f \( -iname "ffmpeg.exe" -o -iname "ffprobe.exe" \) -exec cp {} "${GITHUB_WORKSPACE}/ffmpeg/" \;
-          elif [[ "$KEY" == "macos-latest" ]]; then
-            curl -sSL -o ffmpeg.zip "$URL"
-            unzip -q ffmpeg.zip
-            find . -type f \( -name "ffmpeg" -o -name "ffprobe" \) -perm -u=x -exec cp {} "${GITHUB_WORKSPACE}/ffmpeg/" \;
+          curl -sSL -o ffmpeg.tar.xz "$URL"
+          tar -xf ffmpeg.tar.xz
+          # locate a directory that looks like the extracted static build
+          dir=$(find . -maxdepth 2 -type d -name "*ffmpeg*static*" | head -n1 || true)
+          if [[ -n "$dir" ]]; then
+            find "$dir" -type f \( -name "ffmpeg" -o -name "ffprobe" \) -exec cp {} "${GITHUB_WORKSPACE}/ffmpeg/" \;
           else
-            curl -sSL -o ffmpeg.tar.xz "$URL"
-            tar -xf ffmpeg.tar.xz
-            dir=$(find . -maxdepth 2 -type d -name "*ffmpeg*static*" | head -n1 || true)
-            if [[ -n "$dir" ]]; then
-              find "$dir" -type f \( -name "ffmpeg" -o -name "ffprobe" \) -exec cp {} "${GITHUB_WORKSPACE}/ffmpeg/" \;
-            else
-              find . -type f \( -name "ffmpeg" -o -name "ffprobe" \) -exec cp {} "${GITHUB_WORKSPACE}/ffmpeg/" \;
-            fi
+            # fallback: copy any ffmpeg/ffprobe found
+            find . -type f \( -name "ffmpeg" -o -name "ffprobe" \) -exec cp {} "${GITHUB_WORKSPACE}/ffmpeg/" \;
           fi
-
           chmod +x "${GITHUB_WORKSPACE}/ffmpeg/"* || true
-          echo "ffmpeg files in workspace:"
-          ls -la ffmpeg || true
+          echo "ffmpeg files in workspace (${GITHUB_WORKSPACE}/ffmpeg):"
+          ls -la "${GITHUB_WORKSPACE}/ffmpeg" || true
 
       - name: Build with PyInstaller (Windows)
         if: matrix.os == 'windows-latest'
@@ -88,51 +93,56 @@ jobs:
           Write-Host "Building for Windows..."
           $APPNAME = $env:APP_NAME
           $ICON = "assets\logoApp.ico"
-          $ADD_DATA_ASSETS = "assets;assets"
-          $ADD_DATA_FFMPEG = "ffmpeg;ffmpeg"
           $ENTRY = $env:ENTRY_SCRIPT
+
+          $artifactDir = Join-Path $PWD "artifact"
+          if (-not (Test-Path $artifactDir)) { New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null }
 
           python -m PyInstaller --noconfirm --onefile --windowed `
             --name "$APPNAME" `
             --icon "$ICON" `
-            --add-data "$ADD_DATA_ASSETS" `
-            --add-data "$ADD_DATA_FFMPEG" `
+            --add-data "assets;assets" `
+            --add-data "ffmpeg;ffmpeg" `
             "$ENTRY"
 
           $buildPath = Join-Path $PWD "dist" ($APPNAME + ".exe")
           if (-not (Test-Path $buildPath)) {
-            Get-ChildItem -Path dist -Recurse -Force | Format-Table -AutoSize
+            Get-ChildItem -Path (Join-Path $PWD "dist") -Recurse -Force | Format-Table -AutoSize
             throw "Build artifact not found at $buildPath"
           }
 
-          New-Item -ItemType Directory -Force -Path artifact | Out-Null
-          Copy-Item -Path $buildPath -Destination (Join-Path $PWD "artifact" -ChildPath (Split-Path $buildPath -Leaf)) -Force
-          if (Test-Path .\ffmpeg) { Copy-Item -Path .\ffmpeg -Destination .\artifact\ -Recurse -Force }
+          Copy-Item -Path $buildPath -Destination (Join-Path $artifactDir (Split-Path $buildPath -Leaf)) -Force
+
+          $ffmpegSrc = Join-Path $PWD "ffmpeg"
+          if (Test-Path $ffmpegSrc) {
+            Copy-Item -Path $ffmpegSrc -Destination $artifactDir -Recurse -Force
+            Write-Host "Copied ffmpeg into artifact"
+            Get-ChildItem -Path (Join-Path $artifactDir "ffmpeg") -File | Format-Table -AutoSize
+          } else {
+            Write-Host "No ffmpeg folder found at $ffmpegSrc"
+          }
 
           $tag = "${{ github.ref_name }}" -replace 'refs/tags/',''
           if (-not $tag) { $tag = "latest" }
           $ARTNAME = "$APPNAME-windows-latest-$tag.zip"
           $zipPath = Join-Path $PWD $ARTNAME
           if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-          Compress-Archive -Path artifact\* -DestinationPath $zipPath -Force
+          Compress-Archive -Path (Join-Path $artifactDir '*') -DestinationPath $zipPath -Force
           $hash = Get-FileHash -Path $zipPath -Algorithm SHA256
           $hash.Hash | Out-File -Encoding ASCII -FilePath ("${zipPath}.sha256")
           Write-Host "Created $zipPath and ${zipPath}.sha256"
 
-      - name: Build with PyInstaller (Linux / macOS)
-        if: matrix.os != 'windows-latest'
+      - name: Build with PyInstaller (Linux)
+        if: matrix.os == 'ubuntu-latest'
         shell: bash
         env:
           ENTRY_SCRIPT: main.py
           APP_NAME: YouTubeDownloader
         run: |
           set -euo pipefail
-          echo "Building for ${{ matrix.os }}..."
-          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            ICON="assets/logoApp.icns"
-          else
-            ICON="assets/logoApp.png"
-          fi
+          echo "Building for Linux..."
+          ICON="assets/logoApp.png"
+          mkdir -p artifact
 
           python -m PyInstaller --noconfirm --onefile --windowed \
             --name "$APP_NAME" \
@@ -141,14 +151,24 @@ jobs:
             --add-data "ffmpeg:ffmpeg" \
             "$ENTRY_SCRIPT"
 
-          mkdir -p artifact
           if [ -f "dist/$APP_NAME" ]; then
             cp "dist/$APP_NAME" artifact/
+          else
+            echo "dist/$APP_NAME not found; listing dist for debug"
+            ls -la dist || true
+            exit 1
           fi
-          cp -r ffmpeg artifact/ || true
+
+          if [ -d "${GITHUB_WORKSPACE}/ffmpeg" ]; then
+            cp -r "${GITHUB_WORKSPACE}/ffmpeg" artifact/ || true
+            echo "Copied ffmpeg into artifact"
+            ls -la artifact/ffmpeg || true
+          else
+            echo "ffmpeg/ not found in workspace (${GITHUB_WORKSPACE}/ffmpeg)"
+          fi
 
           tag="${GITHUB_REF_NAME:-latest}"
-          ARTNAME="$APP_NAME-${{ matrix.os }}-$tag.zip"
+          ARTNAME="$APP_NAME-linux-$tag.zip"
           if command -v zip >/dev/null 2>&1; then
             zip -r "$ARTNAME" artifact
           else
