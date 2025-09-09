@@ -45,7 +45,7 @@ jobs:
           pip install pyinstaller
         shell: bash
 
-      - name: Install ffmpeg (platform)
+      - name: Install ffmpeg
         run: |
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             sudo apt-get update
@@ -58,53 +58,63 @@ jobs:
           fi
         shell: bash
 
-      - name: Build with PyInstaller
+      - name: Build with PyInstaller (windowed, icon)
         env:
           PYTHONUNBUFFERED: 1
         run: |
-          echo "Building on runner: $RUNNER_OS / matrix.os = ${{ matrix.os }}"
+          set -euo pipefail
 
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            ICON_FLAG="--icon assets/logoApp.ico"
             ADD_DATA="assets;assets"
-            pyinstaller --noconfirm --onefile --name "${{ env.APP_NAME }}.exe" --add-data "$ADD_DATA" "${{ env.ENTRY_SCRIPT }}"
-            BUILD_PATH="dist/${{ env.APP_NAME }}.exe"
-          else
+            EXE_NAME="${{ env.APP_NAME }}.exe"
+          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            ICON_FLAG="--icon assets/logoApp.icns"
             ADD_DATA="assets:assets"
-            pyinstaller --noconfirm --onefile --name "${{ env.APP_NAME }}" --add-data "$ADD_DATA" "${{ env.ENTRY_SCRIPT }}"
-            BUILD_PATH="dist/${{ env.APP_NAME }}"
+            EXE_NAME="${{ env.APP_NAME }}"
+          else
+            ICON_FLAG="--icon assets/logoApp.png"
+            ADD_DATA="assets:assets"
+            EXE_NAME="${{ env.APP_NAME }}"
           fi
 
-          echo "Expected build path: $BUILD_PATH"
+          if [[ -n "${ICON_FLAG}" ]]; then
+            pyinstaller --noconfirm --onefile --windowed --name "$EXE_NAME" $ICON_FLAG --add-data "$ADD_DATA" "${{ env.ENTRY_SCRIPT }}"
+          else
+            pyinstaller --noconfirm --onefile --windowed --name "$EXE_NAME" --add-data "$ADD_DATA" "${{ env.ENTRY_SCRIPT }}"
+          fi
+
+          BUILD_PATH="dist/$EXE_NAME"
           if [ ! -f "$BUILD_PATH" ]; then
-            echo "ERROR: Build artifact not found at $BUILD_PATH"
             ls -la dist || true
+            echo "ERROR: Build artifact not found at $BUILD_PATH"
             exit 1
           fi
 
           mkdir -p artifact
           cp "$BUILD_PATH" artifact/
-
-          if [ -d "ffmpeg" ]; then
-            cp -r ffmpeg artifact/
-          fi
+          if [ -d "ffmpeg" ]; then cp -r ffmpeg artifact/; fi
 
           ARTNAME="${{ env.APP_NAME }}-${{ matrix.os }}-${GITHUB_REF_NAME}.${{ matrix.ext }}"
-          echo "Artifact name will be: $ARTNAME"
 
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             powershell -Command "Compress-Archive -Path artifact/* -DestinationPath '${GITHUB_WORKSPACE}/${ARTNAME}' -Force"
+            powershell -Command "Get-FileHash -Algorithm SHA256 -Path '${GITHUB_WORKSPACE}\\${ARTNAME}' | ForEach-Object { $_.Hash } > '${GITHUB_WORKSPACE}\\${ARTNAME}.sha256'"
           else
             tar -czf "${GITHUB_WORKSPACE}/${ARTNAME}" -C artifact .
+            sha256sum "${GITHUB_WORKSPACE}/${ARTNAME}" | awk '{print $1}' > "${GITHUB_WORKSPACE}/${ARTNAME}.sha256"
           fi
 
-          echo "Created archive: ${GITHUB_WORKSPACE}/${ARTNAME}"
+          echo "Created ${GITHUB_WORKSPACE}/${ARTNAME}"
         shell: bash
 
-      - name: Upload build artifact
+      - name: Upload build artifact and checksum
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.APP_NAME }}-${{ matrix.os }}-${{ github.ref_name }}.${{ matrix.ext }}
-          path: ${{ github.workspace }}/${{ env.APP_NAME }}-${{ matrix.os }}-${{ github.ref_name }}.${{ matrix.ext }}
+          path: |
+            ${{ github.workspace }}/${{ env.APP_NAME }}-${{ matrix.os }}-${{ github.ref_name }}.${{ matrix.ext }}
+            ${{ github.workspace }}/${{ env.APP_NAME }}-${{ matrix.os }}-${{ github.ref_name }}.${{ matrix.ext }}.sha256
 
   create-release:
     name: Create Release and attach artifacts
@@ -112,24 +122,97 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - name: Download artifacts from build job(s)
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: downloaded_artifacts
 
       - name: List downloaded artifacts
-        run: ls -la downloaded_artifacts || true
+        run: |
+          ls -la downloaded_artifacts || true
         shell: bash
 
-      - name: Create release & upload assets (softprops)
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: |
-            downloaded_artifacts/*
+      - name: Get release by tag
+        id: get_release
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}"
+          resp=$(curl -sS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "$API" || true)
+          echo "$resp" > /tmp/release_by_tag.json || true
+          jq -r '.id // empty' /tmp/release_by_tag.json > /tmp/release_id || true
+          jq -r '.upload_url // empty' /tmp/release_by_tag.json > /tmp/upload_url || true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+
+      - name: Create release if missing
+        id: create_release
+        run: |
+          set -euo pipefail
+          RELEASE_ID=$(cat /tmp/release_id 2>/dev/null || true)
+          UPLOAD_URL=$(cat /tmp/upload_url 2>/dev/null || true)
+          if [ -n "$RELEASE_ID" ] && [ -n "$UPLOAD_URL" ]; then
+            echo "upload_url=$UPLOAD_URL" >> $GITHUB_OUTPUT
+            echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          API="https://api.github.com/repos/${{ github.repository }}/releases"
+          payload=$(jq -n --arg tag "${{ github.ref_name }}" --arg name "Release ${{ github.ref_name }}" --arg body "Automated release generated by GitHub Actions" '{tag_name:$tag, name:$name, body:$body, draft:false, prerelease:false}')
+          resp=$(curl -sS -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -d "$payload" "$API")
+          echo "$resp" > /tmp/release_create.json
+          RID=$(jq -r '.id' /tmp/release_create.json || true)
+          UPL=$(jq -r '.upload_url' /tmp/release_create.json || true)
+          if [ -z "$RID" ] || [ -z "$UPL" ]; then
+            cat /tmp/release_create.json || true
+            echo "Failed creating release"
+            exit 1
+          fi
+          echo "upload_url=$UPL" >> $GITHUB_OUTPUT
+          echo "release_id=$RID" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+
+      - name: Upload artifacts to release (delete existing same-name assets first)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          UPLOAD_URL_TEMPLATE="${{ steps.create_release.outputs.upload_url }}"
+          UPLOAD_URL="${UPLOAD_URL_TEMPLATE%\{*}"
+          RELEASE_ID="${{ steps.create_release.outputs.release_id }}"
+
+          if [ -z "$UPLOAD_URL" ] || [ -z "$RELEASE_ID" ]; then
+            echo "Missing upload_url or release_id"
+            exit 1
+          fi
+
+          ASSET_LIST_API="https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets"
+          assets_json=$(curl -sS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "$ASSET_LIST_API")
+          echo "$assets_json" > /tmp/existing_assets.json || true
+
+          for filepath in downloaded_artifacts/*; do
+            if [ ! -f "$filepath" ]; then
+              continue
+            fi
+            FNAME=$(basename "$filepath")
+            EXISTING_ID=$(jq -r --arg name "$FNAME" '.[] | select(.name==$name) | .id' /tmp/existing_assets.json || true)
+            if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
+              curl -sS -X DELETE -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases/assets/${EXISTING_ID}" || true
+            fi
+            resp_file=/tmp/upload_resp_${FNAME}.json
+            curl --fail -sSL -X POST \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"${filepath}" \
+              "${UPLOAD_URL}?name=${FNAME}" \
+              -o "$resp_file" -w "\nHTTP_CODE:%{http_code}\n"
+            cat "$resp_file" || true
+          done
+        shell: bash
 
       - name: Done
-        run: echo "Release ${{ github.ref_name }} created and artifacts uploaded."
+        run: echo "Release ${{ github.ref_name }} ensured and artifacts uploaded."
         shell: bash
