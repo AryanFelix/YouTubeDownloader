@@ -3,7 +3,7 @@ name: Build & Release
 on:
   push:
     tags:
-      - "v*.*.*"
+      - 'v*.*.*'
 
 permissions:
   contents: write
@@ -38,53 +38,114 @@ jobs:
         with:
           python-version: 3.11
 
-      - name: Install deps & PyInstaller
+      - name: Install Python deps and PyInstaller (Linux / macOS)
+        if: matrix.os != 'windows-latest'
+        shell: bash
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install pyinstaller
-        shell: bash
 
-      - name: Install ffmpeg
+      - name: Install Python deps and PyInstaller (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
         run: |
-          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            sudo apt-get update
-            sudo apt-get install -y ffmpeg
-          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            brew update || true
-            brew install ffmpeg || true
-          elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            choco install -y ffmpeg
-          fi
-        shell: bash
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+          pip install pyinstaller
 
-      - name: Build with PyInstaller (windowed, icon)
+      - name: Prepare portable ffmpeg (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Preparing ffmpeg for linux runner..."
+          FFMPEG_URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+          mkdir -p ffmpeg
+          tmpdir="$(mktemp -d)"
+          cd "$tmpdir"
+          curl -sSL -o ffmpeg.tar.xz "$FFMPEG_URL"
+          tar -xf ffmpeg.tar.xz
+          dir=$(find . -maxdepth 2 -type d -name "*ffmpeg*static*" | head -n1 || true)
+          if [ -n "$dir" ]; then
+            find "$dir" -type f -iname "ffmpeg" -o -iname "ffprobe" -print0 | xargs -0 -I{} cp {} "${GITHUB_WORKSPACE}/ffmpeg/"
+          else
+            find . -type f -iname "ffmpeg" -o -iname "ffprobe" -print0 | xargs -0 -I{} cp {} "${GITHUB_WORKSPACE}/ffmpeg/" || true
+          fi
+          chmod +x "${GITHUB_WORKSPACE}/ffmpeg/"* || true
+          echo "FFMPEG_DIR=${GITHUB_WORKSPACE}/ffmpeg" >> ${GITHUB_OUTPUT}
+
+      - name: Prepare portable ffmpeg (macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Preparing ffmpeg for macos runner..."
+          FFMPEG_URL="https://evermeet.cx/ffmpeg/ffmpeg-6.0.zip"
+          mkdir -p ffmpeg
+          tmpdir="$(mktemp -d)"
+          cd "$tmpdir"
+          curl -sSL -o ffmpeg.zip "$FFMPEG_URL"
+          unzip -q ffmpeg.zip
+          # copy any executable named ffmpeg / ffprobe
+          find . -type f -perm -u=x -name "ffmpeg" -o -name "ffprobe" -print0 | xargs -0 -I{} cp {} "${GITHUB_WORKSPACE}/ffmpeg/" || true
+          chmod +x "${GITHUB_WORKSPACE}/ffmpeg/"* || true
+          echo "FFMPEG_DIR=${GITHUB_WORKSPACE}/ffmpeg" >> ${GITHUB_OUTPUT}
+
+      - name: Prepare portable ffmpeg (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "Preparing ffmpeg for windows runner..."
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
+          New-Item -ItemType Directory -Force -Path ffmpeg | Out-Null
+          $tmp = New-TemporaryFile
+          Invoke-WebRequest -Uri $url -OutFile $tmp
+          $extractDir = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "ffext") -Force
+          Expand-Archive -Path $tmp -DestinationPath $extractDir -Force
+          Get-ChildItem -Path $extractDir -Filter "ffmpeg.exe" -Recurse | ForEach-Object { Copy-Item -Path $_.FullName -Destination (Join-Path $PWD "ffmpeg") -Force }
+          Get-ChildItem -Path $extractDir -Filter "ffprobe.exe" -Recurse | ForEach-Object { Copy-Item -Path $_.FullName -Destination (Join-Path $PWD "ffmpeg") -Force }
+          Get-ChildItem -Path (Join-Path $PWD "ffmpeg") | ForEach-Object { & icacls $_.FullName /grant Everyone:R } || true
+          Write-Host "FFMPEG_DIR=$PWD\\ffmpeg" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Verify ffmpeg (debug)
+        shell: bash
+        run: |
+          echo "FFMPEG folder contents:"
+          if [ -d ffmpeg ]; then ls -la ffmpeg || true; else echo "ffmpeg/ not found"; fi
+        if: matrix.os != 'windows-latest'
+
+      - name: Verify ffmpeg (debug Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Write-Host "FFMPEG folder contents:"
+          if (Test-Path .\ffmpeg) { Get-ChildItem .\ffmpeg -Force | Format-Table -AutoSize } else { Write-Host "ffmpeg/ not found" }
+
+      - name: Build with PyInstaller (Linux / macOS)
+        if: matrix.os != 'windows-latest'
+        shell: bash
         env:
           PYTHONUNBUFFERED: 1
         run: |
           set -euo pipefail
-
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            ICON_FLAG="--icon assets/logoApp.ico"
-            ADD_DATA="assets;assets"
-            EXE_NAME="${{ env.APP_NAME }}.exe"
-          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+          echo "Building for ${RUNNER_OS:-linux/macos}..."
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
             ICON_FLAG="--icon assets/logoApp.icns"
-            ADD_DATA="assets:assets"
-            EXE_NAME="${{ env.APP_NAME }}"
+            ADD_DATA_ASSETS="assets:assets"
+            ADD_DATA_FFMPEG="ffmpeg:ffmpeg"
+            EXENAME="${APP_NAME}"
           else
             ICON_FLAG="--icon assets/logoApp.png"
-            ADD_DATA="assets:assets"
-            EXE_NAME="${{ env.APP_NAME }}"
+            ADD_DATA_ASSETS="assets:assets"
+            ADD_DATA_FFMPEG="ffmpeg:ffmpeg"
+            EXENAME="${APP_NAME}"
           fi
 
-          if [[ -n "${ICON_FLAG}" ]]; then
-            pyinstaller --noconfirm --onefile --windowed --name "$EXE_NAME" $ICON_FLAG --add-data "$ADD_DATA" "${{ env.ENTRY_SCRIPT }}"
-          else
-            pyinstaller --noconfirm --onefile --windowed --name "$EXE_NAME" --add-data "$ADD_DATA" "${{ env.ENTRY_SCRIPT }}"
-          fi
+          pyinstaller --noconfirm --onefile --windowed --name "$EXENAME" $ICON_FLAG --add-data "$ADD_DATA_ASSETS" --add-data "$ADD_DATA_FFMPEG" "${ENTRY_SCRIPT}"
 
-          BUILD_PATH="dist/$EXE_NAME"
+          BUILD_PATH="dist/${EXENAME}"
           if [ ! -f "$BUILD_PATH" ]; then
             ls -la dist || true
             echo "ERROR: Build artifact not found at $BUILD_PATH"
@@ -92,20 +153,43 @@ jobs:
           fi
 
           mkdir -p artifact
-          cp "$BUILD_PATH" artifact/
-          if [ -d "ffmpeg" ]; then cp -r ffmpeg artifact/; fi
+          cp "$BUILD_PATH" artifact/ || true
+          if [ -d "ffmpeg" ]; then cp -r ffmpeg artifact/ || true; fi
 
-          ARTNAME="${{ env.APP_NAME }}-${{ matrix.os }}-${GITHUB_REF_NAME}.${{ matrix.ext }}"
+          ARTNAME="${APP_NAME}-${{ matrix.os }}-${{ github.ref_name }}.${{ matrix.ext }}"
 
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            powershell -Command "Compress-Archive -Path artifact/* -DestinationPath '${GITHUB_WORKSPACE}\\${ARTNAME}' -Force; (Get-FileHash -Algorithm SHA256 -Path '${GITHUB_WORKSPACE}\\${ARTNAME}').Hash | Out-File -Encoding ASCII -FilePath '${GITHUB_WORKSPACE}\\${ARTNAME}.sha256'"
-          else
-            tar -czf "${GITHUB_WORKSPACE}/${ARTNAME}" -C artifact .
-            sha256sum "${GITHUB_WORKSPACE}/${ARTNAME}" | awk '{print $1}' > "${GITHUB_WORKSPACE}/${ARTNAME}.sha256"
-          fi
-
+          tar -czf "${GITHUB_WORKSPACE}/${ARTNAME}" -C artifact .
+          sha256sum "${GITHUB_WORKSPACE}/${ARTNAME}" | awk '{print $1}' > "${GITHUB_WORKSPACE}/${ARTNAME}.sha256"
           echo "Created ${GITHUB_WORKSPACE}/${ARTNAME}"
-        shell: bash
+
+      - name: Build with PyInstaller (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          PYTHONUNBUFFERED: 1
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "Building for Windows..."
+          $ICON_FLAG = "--icon assets\\logoApp.ico"
+          $ADD_DATA_ASSETS = "assets;assets"
+          $ADD_DATA_FFMPEG = "ffmpeg;ffmpeg"
+          $EXENAME = "${env:APP_NAME}.exe"
+          pyinstaller --noconfirm --onefile --windowed --name $EXENAME $ICON_FLAG --add-data $ADD_DATA_ASSETS --add-data $ADD_DATA_FFMPEG ${env:ENTRY_SCRIPT}
+          $buildPath = Join-Path $PWD "dist" $EXENAME
+          if (-not (Test-Path $buildPath)) {
+            Get-ChildItem -Path dist -Recurse -Force | Format-Table -AutoSize
+            throw "Build artifact not found at $buildPath"
+          }
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item -Path $buildPath -Destination (Join-Path $PWD "artifact" -ChildPath $EXENAME) -Force
+          if (Test-Path .\ffmpeg) { Copy-Item -Path .\ffmpeg -Destination .\artifact\ -Recurse -Force }
+          $ARTNAME = "${env:APP_NAME}-${{ matrix.os }}-${{ github.ref_name }}.${{ matrix.ext }}"
+          $zipPath = Join-Path $PWD $ARTNAME
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive -Path artifact\* -DestinationPath $zipPath -Force
+          $hash = Get-FileHash -Path $zipPath -Algorithm SHA256
+          $hash.Hash | Out-File -Encoding ASCII -FilePath "${zipPath}.sha256"
+          Write-Host "Created $zipPath"
 
       - name: Upload build artifact and checksum
         uses: actions/upload-artifact@v4
@@ -200,12 +284,7 @@ jobs:
             EXISTING_ID=$(jq -r --arg name "$FNAME" '.[] | select(.name==$name) | .id' /tmp/existing_assets.json || true)
             if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
               echo "Deleting existing asset id $EXISTING_ID (name $FNAME)"
-              del_code=$(curl -s -o /tmp/del_resp.txt -w "%{http_code}" -X DELETE \
-                -H "Authorization: token ${GITHUB_TOKEN}" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/${REPO}/releases/assets/${EXISTING_ID}" || true)
-              echo "Delete HTTP code: $del_code"
-              cat /tmp/del_resp.txt || true
+              curl -sS -X DELETE -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases/assets/${EXISTING_ID}" || true
             fi
 
             try=0
