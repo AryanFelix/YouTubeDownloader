@@ -48,9 +48,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path artifact | Out-Null
           if (Test-Path 'dist\YouTubeDownloader.exe') {
             Copy-Item -Path 'dist\YouTubeDownloader.exe' -Destination 'artifact\YouTubeDownloader.exe' -Force
-            Write-Host "✅ Copied exe to artifact/"
+            Write-Host 'Copied exe to artifact/'
           } else {
-            Write-Error "❌ dist\YouTubeDownloader.exe not found — build may have failed earlier."
+            Write-Error 'dist\YouTubeDownloader.exe not found - build may have failed earlier.'
             exit 1
           }
 
