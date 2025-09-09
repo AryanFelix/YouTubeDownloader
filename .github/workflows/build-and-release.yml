@@ -1,5 +1,9 @@
 name: Build & Release (Windows)
 
+# Grant explicit permissions to the workflow so GITHUB_TOKEN can create releases
+permissions:
+  contents: write
+
 on:
   push:
     tags:
@@ -54,6 +58,7 @@ jobs:
             exit 1
           }
 
+      # Create release (only runs for tag pushes)
       - name: Create release (if triggered by tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/create-release@v1
