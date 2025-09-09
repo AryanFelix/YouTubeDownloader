@@ -3,8 +3,8 @@ name: Build & Release (Windows)
 on:
   push:
     tags:
-      - 'v*'         # run when you push a tag like v1.0.0
-  workflow_dispatch:  # allow manual run
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build_windows:
@@ -24,7 +24,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install yt-dlp pyinstaller
 
-      # Download portable ffmpeg for Windows (x64)
       - name: Download ffmpeg (Windows build)
         run: |
           powershell -Command " \
