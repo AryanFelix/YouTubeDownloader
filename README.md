@@ -4,6 +4,8 @@ YouTubeDownloader is a modern, cross-platform desktop app for downloading YouTub
 It features a clean user interface, queue management, activity logs, and retry handling.  
 Executables for Windows, Linux, and macOS are published automatically via [GitHub Releases](../../releases).
 
+
+![YTDown.png](image.png)
 ---
 
 ## Features
